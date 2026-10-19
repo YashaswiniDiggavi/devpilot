@@ -31,8 +31,7 @@ LlmReply llm_complete(const std::string& system, const std::string& user) {
 
     for (int attempt = 0; attempt < 4; ++attempt) {
         if (attempt > 0)
-            std::this_thread::sleep_for(std::chrono::seconds(1 << attempt));
-
+            std::this_thread::sleep_for(std::chrono::seconds(5 << attempt));  // 10s, 20s, 40s
         CURL* curl = curl_easy_init();
         if (!curl) { r.error = "curl init failed"; return r; }
 
@@ -55,8 +54,10 @@ LlmReply llm_complete(const std::string& system, const std::string& user) {
         curl_easy_cleanup(curl);
 
         if (rc != CURLE_OK) { r.error = curl_easy_strerror(rc); continue; }
-        if (status == 429 || status >= 500) { r.error = "HTTP " + std::to_string(status); continue; }
-        if (status != 200) { r.error = "HTTP " + std::to_string(status) + ": " + response; return r; }
+        if (status == 429 || status >= 500) {
+            r.error = "HTTP " + std::to_string(status) + ": " + response.substr(0, 300);
+            continue;
+        }        if (status != 200) { r.error = "HTTP " + std::to_string(status) + ": " + response; return r; }
 
         try {
             json j = json::parse(response);
