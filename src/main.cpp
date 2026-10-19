@@ -1,4 +1,6 @@
+#include <unistd.h>
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -22,13 +24,35 @@ static const char* kSystem =
     "\"new\": \"replacement text\"}]}\n"
     "Never edit CI files. Never delete tests to make them pass.";
 
+// Builds the project inside a locked-down Docker container.
+// Set DEVPILOT_SANDBOX=0 to build directly on the host (debugging only).
 static ProcessResult build(const fs::path& repo) {
-    auto cfg = run_process({"cmake", "-S", ".", "-B", "build", "-G", "Ninja"}, repo, 120s);
-    if (cfg.exit_code != 0) return cfg;
-    return run_process({"cmake", "--build", "build"}, repo, 300s);
+    const char* flag = std::getenv("DEVPILOT_SANDBOX");
+    if (flag && std::string(flag) == "0") {
+        auto cfg = run_process({"cmake", "-S", ".", "-B", "build", "-G", "Ninja"}, repo, 120s);
+        if (cfg.exit_code != 0) return cfg;
+        return run_process({"cmake", "--build", "build"}, repo, 300s);
+    }
+    const std::string user = std::to_string(getuid()) + ":" + std::to_string(getgid());
+    return run_process(
+        {"docker", "run", "--rm",
+         "--network", "none",               // no internet
+         "--memory", "1g", "--cpus", "2",   // resource limits
+         "--pids-limit", "256",             // stops fork bombs
+         "--cap-drop", "ALL",               // no Linux capabilities
+         "--security-opt", "no-new-privileges",
+         "--user", user,                    // not root; files stay owned by you
+         "-e", "HOME=/tmp",
+         "-v", repo.string() + ":/work", "-w", "/work",
+         "devpilot-sandbox",
+         "timeout", "280", "bash", "-c",
+         "rm -rf build && cmake -S . -B build -G Ninja && cmake --build build"},
+        repo, 330s);
 }
 
-static fs::path resolve(const fs::path& repo, const std::string& p) {
+// Diagnostic paths may be container paths (/work/...), relative to build/, or relative to the repo.
+static fs::path resolve(const fs::path& repo, std::string p) {
+    if (p.rfind("/work/", 0) == 0) p = (repo / p.substr(6)).string();
     for (fs::path base : {repo / "build", repo}) {
         fs::path c = fs::weakly_canonical(fs::path(p).is_absolute() ? fs::path(p) : base / p);
         auto rel = c.lexically_relative(repo);
@@ -69,10 +93,10 @@ int main(int argc, char** argv) {
             prompt << d.file << ":" << d.line << ": " << d.message << "\n";
             if (auto f = resolve(repo, d.file); !f.empty()) files.insert(f);
         }
-                if (shown == 0) {  // not a compiler error (e.g. CMake or linker): show the log tail
+        if (shown == 0) {  // not a compiler error (e.g. CMake or linker): show the log tail
             const auto& o = b.output;
             prompt << "(none parsed)\n\n## Raw log tail\n" << o.substr(o.size() > 3000 ? o.size() - 3000 : 0) << "\n";
-            // No file was named by a diagnostic, so give the model the project's source files.
+            // No diagnostic named a file, so give the model the project's source files.
             for (const auto& e : fs::recursive_directory_iterator(repo)) {
                 if (!e.is_regular_file()) continue;
                 auto rel = fs::relative(e.path(), repo);
