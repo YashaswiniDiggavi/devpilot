@@ -69,9 +69,20 @@ int main(int argc, char** argv) {
             prompt << d.file << ":" << d.line << ": " << d.message << "\n";
             if (auto f = resolve(repo, d.file); !f.empty()) files.insert(f);
         }
-        if (shown == 0) {
+                if (shown == 0) {  // not a compiler error (e.g. CMake or linker): show the log tail
             const auto& o = b.output;
             prompt << "(none parsed)\n\n## Raw log tail\n" << o.substr(o.size() > 3000 ? o.size() - 3000 : 0) << "\n";
+            // No file was named by a diagnostic, so give the model the project's source files.
+            for (const auto& e : fs::recursive_directory_iterator(repo)) {
+                if (!e.is_regular_file()) continue;
+                auto rel = fs::relative(e.path(), repo);
+                const std::string top = rel.begin()->string();
+                if (top == "build" || top == ".git") continue;
+                const std::string ext = e.path().extension().string();
+                const bool wanted = ext == ".cpp" || ext == ".cc" || ext == ".hpp" || ext == ".h" || ext == ".txt";
+                if (wanted && files.size() < 8 && fs::file_size(e.path()) < 20000)
+                    files.insert(e.path());
+            }
         }
         prompt << "\n## Source files\n";
         for (const auto& f : files)
